@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.1.0 - 2026-09-12
+
 ### Added
 
 - Model-aware thinking effort control in the composer, defaulting to Medium and exposing Extra high only when supported by Pi.
