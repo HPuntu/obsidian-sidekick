@@ -1,7 +1,7 @@
 {
   "id": "local-sidekick",
   "name": "Local Sidekick",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.7.2",
   "description": "A local Pi and Ollama agent sidebar for vault workflows.",
   "author": "HPuntu",
