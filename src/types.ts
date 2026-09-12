@@ -56,6 +56,8 @@ export interface AgentSessionHistoryItem {
 }
 
 export type ProposedEditStatus =
+  | "applying"
+  | "cancelled"
   | "applied"
   | "apply-error"
   | "approved"
@@ -63,6 +65,7 @@ export type ProposedEditStatus =
   | "pending-approval";
 
 export interface ProposedEditRecord {
+  source?: "agent-tool";
   approvalId?: string;
   applyError?: string;
   createdAt: string;

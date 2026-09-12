@@ -14,6 +14,19 @@ const builtins = Array.from(new Set([
 ]));
 
 const context = await esbuild.context({
+  plugins: [{
+    name: "sidekick-pi-extension",
+    setup(build) {
+      build.onResolve({ filter: /^sidekick:pi-extension$/ }, () => ({ path: "vault-tools", namespace: "sidekick" }));
+      build.onLoad({ filter: /.*/, namespace: "sidekick" }, async () => {
+        const extension = await esbuild.build({
+          entryPoints: ["src/bridge/pi/vaultToolsExtension.ts"], bundle: true,
+          platform: "node", format: "esm", target: "es2022", write: false
+        });
+        return { contents: extension.outputFiles[0].text, loader: "text", watchFiles: ["src/bridge/pi/vaultToolsExtension.ts"] };
+      });
+    }
+  }],
   banner: {
     js: banner
   },

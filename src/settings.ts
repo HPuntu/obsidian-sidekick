@@ -5,8 +5,10 @@ import type AgentDashboardPlugin from "./main";
 import { DEFAULT_SIDEKICK_ROOT, normalizeSidekickRoot } from "./agent/SidekickProfile";
 import type { PiToolMode } from "./types";
 import type { ThinkingPreference } from "./bridge/pi/thinking";
+import type { VaultEditMode } from "./agent/VaultToolHost";
 
 export interface AgentDashboardSettings {
+  vaultEditMode: VaultEditMode;
   thinkingLevel: ThinkingPreference;
   agentSessionName: string;
   allowedExternalWorkspaceRoots: string;
@@ -26,16 +28,13 @@ export interface AgentDashboardSettings {
 }
 
 export const DEFAULT_SETTINGS: AgentDashboardSettings = {
+  vaultEditMode: "reviewed",
   thinkingLevel: "medium",
   agentSessionName: "default",
   allowedExternalWorkspaceRoots: "",
-  // Pi's built-in read, grep, find, and ls. Meaningful only while
-  // allowPiUserConfig stays false — see below.
+  // Native read tools plus the bundled vault tools selected by vaultEditMode.
   piToolMode: "read-only",
-  // Must stay false. Pi's --tools/--no-tools filter built-in tools only;
-  // extension-registered tools bypass them (earendil-works/pi#2835). Passing
-  // --no-extensions is therefore what makes the read-only mode above mean
-  // anything at all.
+  // Discovery/model selection only. Prompt runs always exclude user resources.
   allowPiUserConfig: false,
   piPromptTimeoutMinutes: 10,
   piExecutablePath: "pi",
@@ -167,7 +166,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Pi tools")
       .setDesc(
-        "Read-only is the default: Pi may use its read, grep, find, and ls tools from the vault root, while bash, edit, and write stay off. Disabled keeps Pi fully tool-free. This only limits Pi's built-in tools, so it holds only while the extensions setting below is off."
+        "Enables Pi's read, grep, find, ls and bundled vault tools. Native bash, edit, and write stay off. Disabled removes all tools. Vault edits are controlled separately by the composer mode. Agent runs always disable user extensions."
       )
       .addDropdown((dropdown) =>
         dropdown
@@ -180,6 +179,19 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
             this.plugin.refreshDashboardViews();
           })
       );
+
+    new Setting(containerEl)
+      .setName("Vault edits")
+      .setDesc("Chat offers read tools only. Reviewed edits pauses each proposed change for approval before writing through Obsidian.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("chat", "Chat")
+        .addOption("reviewed", "Reviewed edits")
+        .setValue(this.plugin.settings.vaultEditMode)
+        .onChange(async (value) => {
+          this.plugin.settings.vaultEditMode = value === "reviewed" ? "reviewed" : "chat";
+          await this.plugin.saveSettings();
+          this.plugin.refreshDashboardViews();
+        }));
 
     new Setting(containerEl)
       .setName("Pi prompt timeout")
@@ -289,9 +301,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 
 
     new Setting(containerEl)
-      .setName("Allow Pi extensions and user configuration")
+      .setName("Pi user configuration for discovery")
       .setDesc(
-        "Off by default, so Pi ignores your own extensions, skills, prompt templates, and context files. Turn this on if you want Pi to use extensions you have written or installed. Be aware that Pi's tool limits only cover its built-in tools: an extension can register tools that ignore the Pi tools setting above, so enabling this means Local Sidekick can no longer bound what Pi does. Only enable it if you trust every extension your Pi configuration loads."
+        "Allows your Pi extensions and resources during discovery and model selection only. Those extensions run as trusted local code. Agent prompt runs always disable user extensions and load only Sidekick's bundled vault tools, so their edit permissions cannot be bypassed by an extension."
       )
       .addToggle((toggle) =>
         toggle

@@ -1,10 +1,17 @@
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import path from "path";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import vaultExtensionSource from "sidekick:pi-extension";
+import type { VaultEditMode, VaultToolRequest, VaultToolResult } from "../../agent/VaultToolHost";
 
 import { piChildEnv } from "./piEnv";
+import { getPiToolNames } from "./piFlags";
 import type { ThinkingPreference } from "./thinking";
 
 export interface PiReadOnlyPromptOptions {
+  vaultEditMode?: VaultEditMode;
   thinkingLevel?: ThinkingPreference;
   executablePath: string;
   modelLabel?: string;
@@ -20,6 +27,8 @@ export interface PiReadOnlyPromptOptions {
 export type PiRunCompletion = "completed" | "stopped";
 
 export interface PiReadOnlyPromptCallbacks {
+  onAssistantMessageStart?(): void;
+  onVaultTool?(request: VaultToolRequest, signal: AbortSignal): Promise<VaultToolResult>;
   onAssistantDelta(delta: string): void;
   /** Terminal failure. Mutually exclusive with onComplete. */
   onError(message: string): void;
@@ -75,12 +84,23 @@ export class PiReadOnlyPromptRun {
   private stderr = "";
   private stdoutBuffer = "";
   private timeout?: number;
+  private controller = new AbortController();
+  private extensionFolder?: string;
+  private rpcToken = randomUUID();
+  private extensionReady = false;
+  private promptSent = false;
+  private startupTimeout?: number;
+  private remainingMs = 0;
+  private timerStarted = 0;
+  private hostRequests = 0;
+  private rpcRequestIds = new Set<string>();
 
   constructor(
     options: PiReadOnlyPromptOptions,
     callbacks: PiReadOnlyPromptCallbacks
   ) {
     this.options = {
+      vaultEditMode: options.vaultEditMode ?? "chat",
       thinkingLevel: options.thinkingLevel ?? "default",
       executablePath: options.executablePath.trim() || "pi",
       modelLabel: options.modelLabel ?? "",
@@ -95,23 +115,38 @@ export class PiReadOnlyPromptRun {
   }
 
   start(): void {
+    void this.startAsync().catch((error: unknown) => this.fail(error instanceof Error ? error.message : String(error)));
+  }
+
+  private async startAsync(): Promise<void> {
     const validationError = validateExecutablePath(this.options.executablePath);
     if (validationError) {
       this.fail(validationError);
       return;
     }
 
-    const args = buildReadOnlyArgs(this.options);
+    let extensionPath: string | undefined;
+    if (this.callbacks.onVaultTool && this.options.toolMode !== "disabled") {
+      const folder = await mkdtemp(path.join(tmpdir(), "local-sidekick-pi-"));
+      if (this.completed) { await rm(folder, { recursive: true, force: true }); return; }
+      this.extensionFolder = folder;
+      extensionPath = path.join(folder, "vault-tools.mjs");
+      await writeFile(extensionPath, vaultExtensionSource, { mode: 0o600 });
+      if (this.completed) return;
+    }
+    const args = buildReadOnlyArgs(this.options, extensionPath);
     this.child = spawn(this.options.executablePath, args, {
       cwd: this.options.workspaceRoot || undefined,
-      env: piChildEnv(),
+      env: { ...piChildEnv(), SIDEKICK_RPC_TOKEN: this.rpcToken, SIDEKICK_VAULT_MODE: this.options.vaultEditMode },
       shell: false,
       stdio: ["pipe", "pipe", "pipe"]
     });
 
-    this.timeout = window.setTimeout(() => {
-      this.fail(`Pi prompt timed out after ${formatTimeout(this.options.timeoutMs)}.`);
-    }, this.options.timeoutMs);
+    this.remainingMs = this.options.timeoutMs;
+    this.resumeTimer();
+    if (extensionPath) {
+      this.startupTimeout = window.setTimeout(() => this.fail("Pi did not load the bundled vault tools. Update Pi and retry."), 15000);
+    }
 
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
@@ -138,11 +173,63 @@ export class PiReadOnlyPromptRun {
       id: "local-sidekick-get-state",
       type: "get_state"
     });
-    this.writeJson({
-      id: "local-sidekick-prompt",
-      message: this.options.prompt,
-      type: "prompt"
-    });
+    if (!extensionPath) this.sendPrompt();
+  }
+
+  private sendPrompt(): void {
+    if (this.promptSent || this.completed) return;
+    this.promptSent = true;
+    this.writeJson({ id: "local-sidekick-prompt", message: this.options.prompt, type: "prompt" });
+  }
+
+  private pauseTimer(): void {
+    if (this.timeout === undefined) return;
+    window.clearTimeout(this.timeout);
+    this.timeout = undefined;
+    this.remainingMs -= Date.now() - this.timerStarted;
+  }
+
+  private resumeTimer(): void {
+    if (this.completed || this.hostRequests > 0) return;
+    this.timerStarted = Date.now();
+    this.timeout = window.setTimeout(() => this.fail(`Pi prompt timed out after ${formatTimeout(this.options.timeoutMs)} of active execution.`), Math.max(1, this.remainingMs));
+  }
+
+  private async handleExtensionRequest(record: Record<string, unknown>): Promise<void> {
+    if (record.method === "notify" && typeof record.message === "string" && record.message.startsWith(`local-sidekick-error:${this.rpcToken}:`)) {
+      this.fail(record.message.slice(`local-sidekick-error:${this.rpcToken}:`.length));
+      return;
+    }
+    if (record.method === "notify" && record.message === `local-sidekick-ready:${this.rpcToken}`) {
+      this.extensionReady = true;
+      window.clearTimeout(this.startupTimeout);
+      this.sendPrompt();
+      return;
+    }
+    const id = record.id;
+    if (typeof id !== "string" || this.completed) return;
+    if (record.method !== "editor" || record.title !== `local-sidekick-tool:${this.rpcToken}` ||
+        !this.extensionReady || !this.callbacks.onVaultTool) {
+      if (["editor", "input", "select", "confirm"].includes(String(record.method))) {
+        this.writeJson({ type: "extension_ui_response", id, cancelled: true });
+      }
+      return;
+    }
+    if (this.rpcRequestIds.has(id)) return;
+    this.rpcRequestIds.add(id);
+    this.pauseTimer();
+    this.hostRequests += 1;
+    let result: VaultToolResult;
+    try {
+      if (typeof record.prefill !== "string" || record.prefill.length > 2_100_000) throw new Error("Invalid vault request payload.");
+      result = await this.callbacks.onVaultTool(JSON.parse(record.prefill) as VaultToolRequest, this.controller.signal);
+    } catch (error) {
+      result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.hostRequests -= 1;
+      if (this.hostRequests === 0) this.resumeTimer();
+    }
+    if (!this.completed) this.writeJson({ type: "extension_ui_response", id, value: JSON.stringify(result) });
   }
 
   abort(): void {
@@ -181,6 +268,11 @@ export class PiReadOnlyPromptRun {
 
     const record = asRecord(parsed);
     if (!record) {
+      return;
+    }
+
+    if (record.type === "extension_ui_request") {
+      void this.handleExtensionRequest(record);
       return;
     }
 
@@ -252,6 +344,10 @@ export class PiReadOnlyPromptRun {
     }
 
     if (record.type === "message_start") {
+      if (asRecord(record.message)?.role === "assistant") {
+        this.emittedAssistantText = false;
+        this.callbacks.onAssistantMessageStart?.();
+      }
       this.callbacks.onStatus("Model response started.");
       return;
     }
@@ -385,6 +481,12 @@ export class PiReadOnlyPromptRun {
   }
 
   private cleanup(): void {
+    this.controller.abort();
+    window.clearTimeout(this.startupTimeout);
+    if (this.extensionFolder) {
+      void rm(this.extensionFolder, { recursive: true, force: true }).catch(() => undefined);
+      this.extensionFolder = undefined;
+    }
     if (this.timeout !== undefined) {
       window.clearTimeout(this.timeout);
       this.timeout = undefined;
@@ -434,6 +536,7 @@ export function setPiRpcModel(
 
   return new Promise((resolve) => {
     const args = buildReadOnlyArgs({
+      vaultEditMode: "chat",
       thinkingLevel: "default",
       allowPiUserConfig,
       executablePath: normalizedPath,
@@ -564,7 +667,7 @@ export function setPiRpcModel(
   });
 }
 
-export function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>): string[] {
+export function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>, extensionPath?: string): string[] {
   const args = [
     "--mode",
     "rpc"
@@ -577,14 +680,16 @@ export function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>): s
   }
 
   if (options.toolMode === "read-only") {
-    args.push("--tools", "read,grep,find,ls");
+    args.push("--tools", getPiToolNames(extensionPath ? options.vaultEditMode : undefined));
   } else {
     args.push("--no-tools");
   }
 
-  if (!options.allowPiUserConfig) {
+  if (!options.allowPiUserConfig || extensionPath) {
     args.push("--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files");
   }
+
+  if (extensionPath) args.push("--extension", extensionPath);
 
   if (options.modelLabel) {
     args.push("--model", options.modelLabel);

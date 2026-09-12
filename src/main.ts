@@ -16,10 +16,9 @@ import {
   AgentToolEvent,
   createAgentEvent
 } from "./agent/AgentSession";
-import {
-  createLineDiff,
-  parseProposedEditsFromMarkdown
-} from "./agent/ProposedEdit";
+import { createLineDiff } from "./agent/ProposedEdit";
+import { VaultToolHost, VAULT_TOOL_NAMES, type VaultChange, type VaultEditMode, type VaultToolResult } from "./agent/VaultToolHost";
+import { createVaultStorage } from "./agent/obsidianVaultTools";
 import {
   buildPiPromptTemplate,
   buildPiSkillResource,
@@ -76,7 +75,6 @@ import {
   normalizeMentionedPath,
   scoreVaultFileSuggestion
 } from "./prompt/mentions";
-import { looksLikeEditRequest } from "./prompt/editIntent";
 import {
   buildDirectiveContext,
   buildMentionedFileContext,
@@ -87,7 +85,7 @@ import {
   PromptContextDeps
 } from "./prompt/buildContext";
 import {
-  getEditProposalInstructions,
+  getVaultToolInstructions,
   getVaultGroundingInstructions,
 } from "./prompt/promptContext";
 import {
@@ -149,7 +147,6 @@ import {
 } from "./util/text";
 import {
   normalizeChatExportPath,
-  normalizeProposedEditPath,
   normalizeVaultFolderPath,
   slugifyFileName
 } from "./util/vaultPath";
@@ -202,6 +199,7 @@ export default class AgentDashboardPlugin extends Plugin {
   private approvalCounter = 0;
   private proposedEditCounter = 0;
   private activePromptRun?: PiReadOnlyPromptRun;
+  private pendingVaultReviews = new Map<string, (approved: boolean) => void>();
   private pendingPiDiscovery?: Promise<void>;
   pipelineStopped = false;
   pipelineStopping = false;
@@ -1093,14 +1091,12 @@ export default class AgentDashboardPlugin extends Plugin {
       this.addAgentEvent("tool", context.eventText);
     }
 
-    // The edit format goes before the grounding rules so the last thing the
-    // model reads before the user's request is how to source its answer, not
-    // an output template it might copy.
+    const toolMode = activeProfile?.toolMode ?? this.settings.piToolMode;
+    const editMode: VaultEditMode = toolMode === "disabled" ? "chat" : this.settings.vaultEditMode;
+    const lastAnswer = [...this.agentEvents].reverse().find((event) => event.kind === "assistant" && event.text.trim());
     const promptForPi = [
       ...contextBlocks.map((context) => context.promptPrefix),
-      // Withheld for prompts that only want an answer: a model that never sees
-      // the edit format cannot answer a summary with an edit proposal.
-      looksLikeEditRequest(trimmedPrompt) ? getEditProposalInstructions() : "For this turn, answer the user's question only. Do not propose file changes, invent a destination file, or output agent-edit blocks, even if earlier turns requested edits.",
+      getVaultToolInstructions(editMode, lastAnswer?.id),
       getVaultGroundingInstructions(),
       trimmedPrompt
     ].filter(Boolean).join("\n\n");
@@ -1110,7 +1106,6 @@ export default class AgentDashboardPlugin extends Plugin {
     this.agentSessionStatus = "running";
     this.pipelineStopped = false;
     const sessionPath = this.getPiSessionPath();
-    const toolMode = activeProfile?.toolMode ?? this.settings.piToolMode;
     const workspaceRoot = this.getVaultRoot();
     if (toolMode === "read-only" && !workspaceRoot) {
       this.agentSessionStatus = "idle";
@@ -1122,9 +1117,10 @@ export default class AgentDashboardPlugin extends Plugin {
     const promptDecision = this.assessSafetyRequest({
       kind: "prompt",
       // The command is recorded for the audit log; the decision uses toolMode.
-      command: `${this.settings.piExecutablePath} --mode rpc ${sessionPath ? `--session ${sessionPath}` : "--no-session"} ${formatPiToolFlag(toolMode)} ${formatPiUserConfigFlag(this.settings.allowPiUserConfig)}`,
-      description: `Run Pi prompt with ${describePiToolMode(toolMode)}`,
-      toolMode
+      command: `${this.settings.piExecutablePath} --mode rpc ${sessionPath ? `--session ${sessionPath}` : "--no-session"} ${formatPiToolFlag(toolMode, editMode)} ${formatPiUserConfigFlag(false)}${toolMode !== "disabled" ? " --extension <bundled-vault-tools>" : ""}`,
+      description: `Run Pi prompt with ${describePiToolMode(toolMode)}; vault mode: ${editMode}`,
+      toolMode,
+      vaultEditMode: editMode
     });
 
     if (!promptDecision.allowed) {
@@ -1149,7 +1145,7 @@ export default class AgentDashboardPlugin extends Plugin {
     // Only blocked decisions are worth a line in the stream; an allowed run is
     // self-evident from the reply that follows.
     this.refreshDashboardViews();
-    this.startReadOnlyPiPrompt(promptForPi, sessionPath, toolMode, workspaceRoot, looksLikeEditRequest(trimmedPrompt));
+    this.startReadOnlyPiPrompt(promptForPi, sessionPath, toolMode, workspaceRoot, editMode);
 
     return true;
   }
@@ -1248,6 +1244,18 @@ export default class AgentDashboardPlugin extends Plugin {
       return;
     }
 
+    const liveReview = this.pendingVaultReviews.get(id);
+    if (liveReview) {
+      record.status = "approved";
+      record.decidedAt = new Date().toISOString();
+      const edit = this.proposedEdits.find((item) => item.approvalId === id);
+      if (edit) edit.status = "applying";
+      liveReview(true);
+      this.refreshDashboardViews();
+      return;
+    }
+    if (this.proposedEdits.some((edit) => edit.approvalId === id && edit.source === "agent-tool")) return;
+
     record.status = "approved";
     record.decidedAt = new Date().toISOString();
     const proposedEdit = this.proposedEdits.find(
@@ -1276,6 +1284,7 @@ export default class AgentDashboardPlugin extends Plugin {
     record.status = "denied";
     record.decidedAt = new Date().toISOString();
     record.note = "Denied by user.";
+    this.pendingVaultReviews.get(id)?.(false);
     const proposedEdit = this.proposedEdits.find(
       (edit) => edit.approvalId === record.id
     );
@@ -1328,6 +1337,9 @@ export default class AgentDashboardPlugin extends Plugin {
       new Notice("Proposed edit not found");
       return;
     }
+    // Live tool requests execute only through their waiting host, never through
+    // the legacy proposal path (including after a restart or cancellation).
+    if (proposedEdit.source === "agent-tool") return;
 
     const approval = proposedEdit.approvalId
       ? this.approvalRecords.find((record) => record.id === proposedEdit.approvalId)
@@ -1606,6 +1618,14 @@ export default class AgentDashboardPlugin extends Plugin {
     this.proposedEdits = Array.isArray(state.proposedEdits)
       ? state.proposedEdits.slice(0, 40)
       : [];
+    for (const edit of this.proposedEdits) {
+      if (edit.source === "agent-tool" && ["pending-approval", "approved", "applying"].includes(edit.status)) {
+        edit.status = "cancelled";
+        edit.applyError = "The original tool run has ended. Ask the agent to inspect the current note again.";
+        const approval = this.approvalRecords.find((item) => item.id === edit.approvalId);
+        if (approval) approval.status = "denied";
+      }
+    }
     this.piSessionId = state.piSessionId;
     this.piSessionMessageCount = state.piSessionMessageCount;
     this.piSessionPath = state.piSessionPath;
@@ -2023,81 +2043,6 @@ export default class AgentDashboardPlugin extends Plugin {
     }
   }
 
-  private async recordProposedEdits(
-    eventId: string | undefined,
-    text: string
-  ): Promise<void> {
-    if (!eventId) {
-      return;
-    }
-
-    const parsedEdits = parseProposedEditsFromMarkdown(text);
-    if (parsedEdits.length === 0) {
-      return;
-    }
-
-    let recordedCount = 0;
-    for (const parsedEdit of parsedEdits) {
-      const vaultPath = normalizeProposedEditPath(parsedEdit.path);
-      if (!vaultPath) {
-        this.addAgentEvent(
-          "tool",
-          `Ignored proposed edit with invalid path: ${parsedEdit.path}`
-        );
-        continue;
-      }
-
-      const duplicate = this.proposedEdits.some(
-        (record) =>
-          record.eventId === eventId &&
-          record.path === vaultPath &&
-          record.replacementText === parsedEdit.replacementText
-      );
-      if (duplicate) {
-        continue;
-      }
-
-      const file = this.app.vault.getFileByPath(vaultPath);
-      const originalText = file ? await this.app.vault.read(file) : "";
-      if (parsedEdit.operation === "append") {
-        parsedEdit.replacementText = originalText + (originalText && !originalText.endsWith("\n") ? "\n\n" : originalText ? "\n" : "") + parsedEdit.replacementText;
-      }
-      const targetPath = this.getVaultPathAbsolutePath(vaultPath);
-      const decision = this.assessSafetyRequest({
-        description: `Apply proposed edit to ${vaultPath}`,
-        kind: "write",
-        targetPath
-      });
-      const approval = this.enqueueApproval(decision);
-
-      this.proposedEditCounter += 1;
-      this.proposedEdits.unshift({
-        approvalId: approval.id,
-        createdAt: new Date().toISOString(),
-        diffLines: createLineDiff(originalText, parsedEdit.replacementText),
-        eventId,
-        fileExists: file !== null,
-        id: `proposed-edit-${this.proposedEditCounter}`,
-        originalText,
-        path: vaultPath,
-        replacementText: parsedEdit.replacementText,
-        status: "pending-approval"
-      });
-      recordedCount += 1;
-    }
-
-    if (this.proposedEdits.length > 40) {
-      this.proposedEdits = this.proposedEdits.slice(0, 40);
-    }
-
-    if (recordedCount > 0) {
-      this.addAgentEvent(
-        "tool",
-        `Detected ${recordedCount} proposed edit(s). Approve before applying.`
-      );
-      this.refreshDashboardViews();
-    }
-  }
 
   private async resolveSidekickProfileForPrompt(
     prompt: string
@@ -2233,7 +2178,7 @@ export default class AgentDashboardPlugin extends Plugin {
     sessionPath: string | undefined,
     toolMode: PiToolMode,
     workspaceRoot: string | undefined,
-    expectEdits = false
+    editMode: VaultEditMode = "chat"
   ): void {
     let assistantText = "";
     let assistantEventId: string | undefined;
@@ -2241,6 +2186,56 @@ export default class AgentDashboardPlugin extends Plugin {
     // Stands in for the run's lifecycle chatter until real output arrives.
     const thinkingEventId = this.addAgentEvent("status", "Thinking...").id;
     const clearThinking = () => this.removeAgentEvent(thinkingEventId);
+    const records = new Map<string, ProposedEditRecord>();
+    const host = workspaceRoot ? new VaultToolHost(editMode, {
+      ...createVaultStorage(this.app.vault, workspaceRoot),
+      answers: new Map(this.agentEvents.filter((event) => event.kind === "assistant" && event.text.trim()).map((event) => [event.id, event.text])),
+      review: (change, signal) => {
+        if (this.pendingVaultReviews.size >= 8) throw new Error("Too many pending reviews. Finish existing reviews first.");
+        clearThinking();
+        // Each operation has its own visible diff, independent of model prose.
+        const event = this.addAgentEvent("assistant", "");
+        const approval = this.enqueueApproval(this.assessSafetyRequest({
+          kind: "write", targetPath: this.getVaultPathAbsolutePath(change.path),
+          description: `Apply reviewed vault tool edit to ${change.path}`
+        }));
+        this.proposedEditCounter += 1;
+        const record: ProposedEditRecord = {
+          id: `proposed-edit-${this.proposedEditCounter}`, source: "agent-tool", approvalId: approval.id,
+          createdAt: new Date().toISOString(), eventId: event.id, path: change.path,
+          originalText: change.original ?? "", replacementText: change.replacement,
+          fileExists: change.original !== undefined, status: "pending-approval",
+          diffLines: createLineDiff(change.original ?? "", change.replacement)
+        };
+        records.set(change.id, record);
+        this.proposedEdits.unshift(record);
+        return new Promise<boolean>((resolve) => {
+          const finish = (approved: boolean) => {
+            signal.removeEventListener("abort", cancel);
+            this.pendingVaultReviews.delete(approval.id);
+            resolve(approved);
+          };
+          const cancel = () => {
+            record.status = "cancelled";
+            approval.status = "denied";
+            finish(false);
+          };
+          this.pendingVaultReviews.set(approval.id, finish);
+          signal.addEventListener("abort", cancel, { once: true });
+          if (signal.aborted) cancel();
+          this.refreshDashboardViews();
+        });
+      },
+      settled: (change: VaultChange, result: VaultToolResult) => {
+        const record = records.get(change.id);
+        if (!record) return;
+        record.status = result.status === "applied" ? "applied" : result.status === "denied" ? "denied" : result.status === "cancelled" ? "cancelled" : "apply-error";
+        record.applyError = ["applied", "denied"].includes(result.status) ? undefined : result.message;
+        if (result.status === "applied") record.fileExists = true;
+        this.queuePluginDataSave();
+        this.refreshDashboardViews();
+      }
+    }) : undefined;
 
     this.activePromptRun = new PiReadOnlyPromptRun(
       {
@@ -2252,10 +2247,16 @@ export default class AgentDashboardPlugin extends Plugin {
         sessionPath,
         timeoutMs: this.settings.piPromptTimeoutMinutes * 60_000,
         toolMode,
+        vaultEditMode: editMode,
         workspaceRoot,
-        allowPiUserConfig: this.settings.allowPiUserConfig
+        allowPiUserConfig: false
       },
       {
+        onVaultTool: host ? (request, signal) => host.execute(request, signal) : undefined,
+        onAssistantMessageStart: () => {
+          assistantText = "";
+          assistantEventId = undefined;
+        },
         onAssistantDelta: (delta) => {
           assistantText += delta;
           if (!assistantEventId) {
@@ -2283,10 +2284,6 @@ export default class AgentDashboardPlugin extends Plugin {
           this.refreshDashboardViews();
         },
         onComplete: (reason) => {
-          if (reason === "completed" && expectEdits) {
-            void this.recordProposedEdits(assistantEventId, assistantText);
-          }
-
           this.activePromptRun = undefined;
           this.agentSessionStatus = "idle";
           clearThinking();
@@ -2311,7 +2308,7 @@ export default class AgentDashboardPlugin extends Plugin {
           this.refreshDashboardViews();
         },
         onToolEvent: (event) => {
-          if (toolMode === "read-only" && isReadOnlyPiToolEvent(event)) {
+          if (toolMode === "read-only" && (isReadOnlyPiToolEvent(event) || VAULT_TOOL_NAMES.some((name) => name === event.name))) {
             this.addToolEvent(createPiToolEvent(event));
             this.refreshDashboardViews();
             return;

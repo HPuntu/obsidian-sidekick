@@ -131,6 +131,7 @@ export function normalizeSettings(
 ): AgentDashboardSettings {
   return {
     ...settings,
+    vaultEditMode: settings.vaultEditMode === "chat" ? "chat" : "reviewed",
     thinkingLevel: normalizeThinking(settings.thinkingLevel),
     agentSessionName:
       settings.agentSessionName?.trim() || DEFAULT_SETTINGS.agentSessionName,

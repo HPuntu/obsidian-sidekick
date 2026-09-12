@@ -1,10 +1,11 @@
 import type { AgentToolEvent } from "../../agent/AgentSession";
 import type { PiToolMode } from "../../types";
 import type { PiToolEvent } from "./PiReadOnlyPrompt";
+import type { VaultEditMode } from "../../agent/VaultToolHost";
 
 /**
- * The Pi tools the plugin is willing to let a run use. Kept in sync with the
- * `--tools` argument built in PiReadOnlyPrompt.buildReadOnlyArgs.
+ * Native read tools. Bundled vault tool events are handled separately because
+ * their write permission is enforced by the Obsidian host before execution.
  */
 export const READ_ONLY_PI_TOOL_NAMES = new Set(["find", "grep", "ls", "read"]);
 
@@ -20,9 +21,15 @@ export function formatPiUserConfigFlag(enabled: boolean): string {
     : "--no-extensions --no-skills --no-prompt-templates --no-context-files";
 }
 
-export function formatPiToolFlag(toolMode: PiToolMode): string {
+export function getPiToolNames(vaultMode?: VaultEditMode): string {
+  const tools = "read,grep,find,ls";
+  if (!vaultMode) return tools;
+  return tools + (vaultMode === "reviewed" ? ",read_note,create_note,append_note,edit_note" : ",read_note");
+}
+
+export function formatPiToolFlag(toolMode: PiToolMode, vaultMode?: VaultEditMode): string {
   if (toolMode === "read-only") {
-    return "--tools read,grep,find,ls";
+    return `--tools ${getPiToolNames(vaultMode)}`;
   }
 
   return "--no-tools";

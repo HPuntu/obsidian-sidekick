@@ -1,6 +1,7 @@
 import path from "path";
 
 import type { PiToolMode } from "../types";
+import type { VaultEditMode } from "../agent/VaultToolHost";
 
 export type SafetyActionKind =
   | "approved-write"
@@ -15,6 +16,7 @@ export type SafetyActionKind =
 export type SafetyMode = "read-only" | "reviewed-edits";
 
 export interface SafetyRequest {
+  vaultEditMode?: VaultEditMode;
   kind: SafetyActionKind;
   command?: string;
   description?: string;
@@ -64,7 +66,9 @@ export function assessSafetyRequest(
     if (request.toolMode === "read-only") {
       return {
         allowed: true,
-        reason: "Prompt run only enables Pi read-only tools.",
+        reason: request.vaultEditMode === "reviewed"
+          ? "Prompt run enables Pi read tools and approval-gated vault tools."
+          : "Prompt run only enables Pi read-only tools.",
         request
       };
     }

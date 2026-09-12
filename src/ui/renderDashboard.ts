@@ -282,6 +282,23 @@ function renderRunControls(
     });
 }
 
+function renderVaultModeControl(plugin: AgentDashboardPlugin, container: HTMLElement): void {
+  const select = container.createEl("select", {
+    cls: "agent-dashboard__vault-mode",
+    attr: { "aria-label": "Vault edit permissions", title: "Vault edit permissions" }
+  });
+  select.createEl("option", { value: "chat", text: "Chat" });
+  select.createEl("option", { value: "reviewed", text: "Reviewed edits" });
+  const toolsDisabled = (plugin.getSelectedSidekickProfile()?.toolMode ?? plugin.settings.piToolMode) === "disabled";
+  select.value = toolsDisabled ? "chat" : plugin.settings.vaultEditMode;
+  select.disabled = plugin.agentSessionStatus === "running" || toolsDisabled;
+  select.addEventListener("change", () => {
+    plugin.settings.vaultEditMode = select.value === "reviewed" ? "reviewed" : "chat";
+    void plugin.saveSettings();
+    plugin.refreshDashboardViews();
+  });
+}
+
 function renderThinkingControl(plugin: AgentDashboardPlugin, container: HTMLElement, options: DashboardRenderOptions): void {
   const model = plugin.piRpcDiscoverySnapshot.models.find(
     (entry) => entry.label === getCurrentModelLabel(plugin)
@@ -1385,6 +1402,7 @@ function renderAgentPanel(
   });
 
   composerActionsEl.createDiv({ cls: "agent-dashboard__composer-spacer" });
+  renderVaultModeControl(plugin, composerActionsEl);
   renderThinkingControl(plugin, composerActionsEl, options);
 
   if (running) {
@@ -1557,6 +1575,7 @@ function renderAgentHistoryPage(
   });
 
   actionsEl.createDiv({ cls: "agent-dashboard__composer-spacer" });
+  renderVaultModeControl(plugin, actionsEl);
   renderThinkingControl(plugin, actionsEl, options);
 
   renderIconButton(actionsEl, {
@@ -1971,7 +1990,7 @@ function renderApprovalRecord(
   });
   new ButtonComponent(actionsEl)
     .setButtonText("Approve")
-    .setTooltip("Record approval without executing")
+    .setTooltip("Approve this request; live vault tools apply the reviewed edit and resume")
     .onClick(() => {
       plugin.approveRequest(record.id);
       options.host.rerender();
@@ -2043,7 +2062,7 @@ function renderAgentEvent(
     cls: "agent-dashboard__event-time",
     text: formatEventTime(event.createdAt)
   });
-  if (event.kind === "assistant") {
+  if (event.kind === "assistant" && event.text) {
     new ButtonComponent(metaEl).setIcon("copy").setTooltip("Copy response")
       .onClick(async () => {
         const latest = plugin.agentEvents.find((entry) => entry.id === event.id)?.text ?? event.text;
@@ -2453,9 +2472,34 @@ function renderProposedEdit(
     renderDiffLine(diffEl, line);
   }
 
+  if (proposedEdit.source === "agent-tool") {
+    const full = cardEl.createEl("details", { cls: "agent-dashboard__full-edit" });
+    full.createEl("summary", { text: "Full contents" });
+    let loaded = false;
+    full.addEventListener("toggle", () => {
+      if (!full.open || loaded) return;
+      loaded = true;
+      if (proposedEdit.fileExists) {
+        full.createEl("h4", { text: "Original" });
+        full.createEl("pre", { text: proposedEdit.originalText });
+      }
+      full.createEl("h4", { text: "Proposed" });
+      full.createEl("pre", { text: proposedEdit.replacementText });
+    });
+  }
+
   const actionsEl = cardEl.createDiv({
     cls: "agent-dashboard__proposed-edit-actions"
   });
+  if (proposedEdit.source === "agent-tool" && proposedEdit.status === "pending-approval") {
+    new ButtonComponent(actionsEl).setIcon("check").setButtonText("Approve and apply")
+      .setTooltip("Apply this exact diff and resume the agent")
+      .onClick(() => { if (proposedEdit.approvalId) plugin.approveRequest(proposedEdit.approvalId); });
+    new ButtonComponent(actionsEl).setIcon("x").setButtonText("Deny")
+      .setTooltip("Reject this edit and tell the agent")
+      .onClick(() => { if (proposedEdit.approvalId) plugin.denyRequest(proposedEdit.approvalId); });
+    return;
+  }
   new ButtonComponent(actionsEl)
     .setButtonText("Open")
     .setTooltip("Open target note")
@@ -2499,6 +2543,10 @@ function getProposedEditApplyState(
       label: "Applied",
       tooltip: "This edit has already been applied"
     };
+  }
+
+  if (proposedEdit.status === "cancelled" || proposedEdit.status === "applying") {
+    return { enabled: false, label: proposedEdit.status === "applying" ? "Applying" : "Cancelled", tooltip: "Live vault tool status" };
   }
 
   if (proposedEdit.status === "denied") {

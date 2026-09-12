@@ -1,5 +1,13 @@
 ## Unreleased
 
+### Agent Harness
+
+- Replace prompt-regex and chat-fence edit detection with explicit vault tools and a pre-execution approval round-trip to Obsidian.
+- Add Chat and Reviewed edits modes, exact-passage/versioned edits, append/create operations, and exact previous-answer saving.
+- Return applied, denied, conflict, failed, and cancelled results to the running agent; verify writes and cancel pending reviews on stop/restart.
+- Keep user extensions disabled in prompt runs; load only the embedded vault-tools extension via a private temporary file. User-config opt-in now affects discovery/model selection only.
+- Add unit, RPC transport, and real-Pi localhost integration tests, plus a separately identified local test package.
+
 ## 1.1.0 - 2026-09-12
 
 ### Added

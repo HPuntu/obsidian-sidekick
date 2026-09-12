@@ -16,6 +16,8 @@
     "sync:version": "node scripts/sync-version.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:pi": "SIDEKICK_PI_INTEGRATION=1 vitest run test/piHarness.integration.test.ts",
+    "package:harness": "npm run build && node scripts/package-harness.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck"
   },
   "keywords": [

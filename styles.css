@@ -1655,11 +1655,28 @@
 }
 
 .agent-dashboard__composer-actions {
+  flex-wrap: wrap;
   align-items: center;
   display: flex;
   gap: 4px;
   /* The spacer element divides context actions from send/stop. */
   justify-content: flex-start;
+}
+
+.agent-dashboard__vault-mode {
+  max-width: 140px;
+  min-width: 80px;
+  height: 30px;
+  font-size: var(--font-ui-small);
+}
+
+.agent-dashboard__full-edit pre {
+  max-height: 320px;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--font-ui-small);
 }
 
 .agent-dashboard__composer-actions button {
