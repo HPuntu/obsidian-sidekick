@@ -4,6 +4,7 @@ import type AgentDashboardPlugin from "../main";
 import type { AgentEvent } from "../agent/AgentSession";
 import {
   createDashboardUiState,
+  hasStreamSelection,
   renderDashboardShell,
   updateStreamedEventText
 } from "../ui/renderDashboard";
@@ -49,6 +50,12 @@ export class AgentDashboardView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    let hadSelection = false;
+    this.registerDomEvent(this.contentEl.ownerDocument, "selectionchange", () => {
+      const selected = hasStreamSelection(this.contentEl);
+      if (hadSelection && !selected) this.scheduleRender();
+      hadSelection = selected;
+    });
     this.render();
   }
 
@@ -102,6 +109,7 @@ export class AgentDashboardView extends ItemView {
   }
 
   render(): void {
+    if (hasStreamSelection(this.contentEl)) return;
     // A full rebuild discards every node the previous render's markdown
     // cleanup handlers point at, so retire that Component with it.
     this.host.markdownComponent = this.replaceMarkdownHolder();

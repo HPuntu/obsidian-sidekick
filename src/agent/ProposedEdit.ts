@@ -1,4 +1,5 @@
 export interface ParsedProposedEdit {
+  operation?: "replace" | "append";
   path: string;
   replacementText: string;
 }
@@ -16,11 +17,11 @@ export function parseProposedEditsFromMarkdown(
   markdown: string
 ): ParsedProposedEdit[] {
   const edits: ParsedProposedEdit[] = [];
-  const blockPattern = /```agent-edit[^\n]*\n([\s\S]*?)\n```/g;
+  const blockPattern = /^(`{3,})agent-edit[^\r\n]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/gm;
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(markdown)) !== null) {
-    const parsed = parseProposedEditBlock(match[1]);
+    const parsed = parseProposedEditBlock(match[2]);
     if (parsed) {
       edits.push(parsed);
     }
@@ -70,7 +71,10 @@ function parseProposedEditBlock(value: string): ParsedProposedEdit | undefined {
     return undefined;
   }
 
+  if (metadata.operation && !["replace", "append"].includes(metadata.operation)) return undefined;
+
   return {
+    operation: metadata.operation === "append" ? "append" : "replace",
     path,
     replacementText
   };

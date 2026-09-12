@@ -1,3 +1,4 @@
+import { resolveThinking } from "./bridge/pi/thinking";
 import {
   FileSystemAdapter,
   MarkdownFileInfo,
@@ -201,6 +202,9 @@ export default class AgentDashboardPlugin extends Plugin {
   private approvalCounter = 0;
   private proposedEditCounter = 0;
   private activePromptRun?: PiReadOnlyPromptRun;
+  private pendingPiDiscovery?: Promise<void>;
+  pipelineStopped = false;
+  pipelineStopping = false;
   private confirmedPiExecutablePaths = new Set<string>([DEFAULT_SETTINGS.piExecutablePath]);
   private agentSessionRecords: PersistedAgentSessionRecord[] = [];
   private lastMarkdownFileInfo: MarkdownFileInfo | null = null;
@@ -897,6 +901,20 @@ export default class AgentDashboardPlugin extends Plugin {
   }
 
   async refreshPiRpcDiscovery(showNotice: boolean): Promise<void> {
+    if (!this.pendingPiDiscovery) {
+      this.pendingPiDiscovery = this.runPiRpcDiscovery().finally(() => {
+        this.pendingPiDiscovery = undefined;
+      });
+    }
+    await this.pendingPiDiscovery;
+    if (showNotice) {
+      new Notice(this.piRpcDiscoverySnapshot.status === "ready"
+        ? "Pi RPC discovery ready"
+        : `Pi RPC discovery failed: ${this.piRpcDiscoverySnapshot.error}`);
+    }
+  }
+
+  private async runPiRpcDiscovery(): Promise<void> {
     if (!(await this.confirmPiExecutableForSession("discover Pi RPC"))) {
       return;
     }
@@ -907,32 +925,28 @@ export default class AgentDashboardPlugin extends Plugin {
       command: `${this.settings.piExecutablePath} --mode rpc --no-session ${formatPiUserConfigFlag(this.settings.allowPiUserConfig)}`,
       description: "Discover Pi RPC readiness"
     });
-    this.piRpcDiscoverySnapshot = createCheckingPiRpcDiscoverySnapshot(
-      this.settings.piExecutablePath
-    );
+    this.piRpcDiscoverySnapshot = {
+      ...createCheckingPiRpcDiscoverySnapshot(this.settings.piExecutablePath),
+      models: this.piRpcDiscoverySnapshot.models,
+      currentModel: this.piRpcDiscoverySnapshot.currentModel
+    };
     this.refreshDashboardViews();
 
     this.piRpcDiscoverySnapshot = await discoverPiRpc(
       this.settings.piExecutablePath,
-      4000,
+      undefined,
       this.settings.allowPiUserConfig
     );
     this.refreshDashboardViews();
 
-    if (!showNotice) {
-      return;
-    }
-
     if (this.piRpcDiscoverySnapshot.status === "ready") {
       this.selectDefaultPiModelIfNeeded();
-      new Notice("Pi RPC discovery ready");
-      return;
     }
-
-    new Notice(`Pi RPC discovery failed: ${this.piRpcDiscoverySnapshot.error}`);
   }
 
   async startPipeline(): Promise<void> {
+    if (this.pipelineStopping) return;
+    this.pipelineStopped = false;
     // Boot the full local pipeline behind one action: check Ollama, probe Pi,
     // discover the RPC models, start the bridge, then activate a model.
     await this.refreshOllamaStatus(false);
@@ -959,16 +973,23 @@ export default class AgentDashboardPlugin extends Plugin {
    * resident on its own timer, so without the eviction this frees nothing.
    */
   async shutdownPipeline(): Promise<void> {
+    if (this.pipelineStopping) return;
+    this.pipelineStopping = true;
     this.stopAgentRun();
+    this.refreshDashboardViews();
+
+    try {
 
     const model = getOllamaModelName(this.settings.selectedPiModel);
     if (!model) {
+      this.pipelineStopped = true;
       new Notice("Sidekick stopped.");
       this.refreshDashboardViews();
       return;
     }
 
     const result = await unloadOllamaModel(this.settings.ollamaHost, model);
+    this.pipelineStopped = result.success;
     new Notice(
       result.success
         ? `Sidekick stopped and unloaded ${result.model}.`
@@ -976,13 +997,20 @@ export default class AgentDashboardPlugin extends Plugin {
     );
 
     await this.refreshOllamaStatus(false);
-    this.refreshDashboardViews();
+    } finally {
+      this.pipelineStopping = false;
+      this.refreshDashboardViews();
+    }
   }
 
   async sendAgentPrompt(
     prompt: string,
     contextMode: AgentPromptContextMode = "none"
   ): Promise<boolean> {
+    if (this.pipelineStopping) {
+      new Notice("Wait for the model to finish unloading.");
+      return false;
+    }
     let trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       new Notice("Enter a prompt first");
@@ -1012,6 +1040,19 @@ export default class AgentDashboardPlugin extends Plugin {
 
     if (!(await this.confirmPiExecutableForSession("run a Pi prompt"))) {
       return false;
+    }
+
+    if (!this.piRpcDiscoverySnapshot.models.some(
+      (model) => model.label === this.settings.selectedPiModel
+    )) {
+      await this.refreshPiRpcDiscovery(false);
+      this.selectDefaultPiModelIfNeeded();
+      if (!this.piRpcDiscoverySnapshot.models.some(
+        (model) => model.label === this.settings.selectedPiModel
+      )) {
+        new Notice(this.piRpcDiscoverySnapshot.error ?? "Selected model is unavailable in Pi. Refresh models and select an available model.");
+        return false;
+      }
     }
 
 
@@ -1059,7 +1100,7 @@ export default class AgentDashboardPlugin extends Plugin {
       ...contextBlocks.map((context) => context.promptPrefix),
       // Withheld for prompts that only want an answer: a model that never sees
       // the edit format cannot answer a summary with an edit proposal.
-      looksLikeEditRequest(trimmedPrompt) ? getEditProposalInstructions() : "",
+      looksLikeEditRequest(trimmedPrompt) ? getEditProposalInstructions() : "For this turn, answer the user's question only. Do not propose file changes, invent a destination file, or output agent-edit blocks, even if earlier turns requested edits.",
       getVaultGroundingInstructions(),
       trimmedPrompt
     ].filter(Boolean).join("\n\n");
@@ -1067,6 +1108,7 @@ export default class AgentDashboardPlugin extends Plugin {
     this.addAgentEvent("user", trimmedPrompt);
     this.agentViewMode = "chat";
     this.agentSessionStatus = "running";
+    this.pipelineStopped = false;
     const sessionPath = this.getPiSessionPath();
     const toolMode = activeProfile?.toolMode ?? this.settings.piToolMode;
     const workspaceRoot = this.getVaultRoot();
@@ -1107,7 +1149,7 @@ export default class AgentDashboardPlugin extends Plugin {
     // Only blocked decisions are worth a line in the stream; an allowed run is
     // self-evident from the reply that follows.
     this.refreshDashboardViews();
-    this.startReadOnlyPiPrompt(promptForPi, sessionPath, toolMode, workspaceRoot);
+    this.startReadOnlyPiPrompt(promptForPi, sessionPath, toolMode, workspaceRoot, looksLikeEditRequest(trimmedPrompt));
 
     return true;
   }
@@ -2017,6 +2059,9 @@ export default class AgentDashboardPlugin extends Plugin {
 
       const file = this.app.vault.getFileByPath(vaultPath);
       const originalText = file ? await this.app.vault.read(file) : "";
+      if (parsedEdit.operation === "append") {
+        parsedEdit.replacementText = originalText + (originalText && !originalText.endsWith("\n") ? "\n\n" : originalText ? "\n" : "") + parsedEdit.replacementText;
+      }
       const targetPath = this.getVaultPathAbsolutePath(vaultPath);
       const decision = this.assessSafetyRequest({
         description: `Apply proposed edit to ${vaultPath}`,
@@ -2187,7 +2232,8 @@ export default class AgentDashboardPlugin extends Plugin {
     prompt: string,
     sessionPath: string | undefined,
     toolMode: PiToolMode,
-    workspaceRoot: string | undefined
+    workspaceRoot: string | undefined,
+    expectEdits = false
   ): void {
     let assistantText = "";
     let assistantEventId: string | undefined;
@@ -2200,6 +2246,8 @@ export default class AgentDashboardPlugin extends Plugin {
       {
         executablePath: this.settings.piExecutablePath,
         modelLabel: selectedModel,
+        thinkingLevel: resolveThinking(this.settings.thinkingLevel,
+          this.piRpcDiscoverySnapshot.models.find((model) => model.label === selectedModel)),
         prompt,
         sessionPath,
         timeoutMs: this.settings.piPromptTimeoutMinutes * 60_000,
@@ -2235,7 +2283,7 @@ export default class AgentDashboardPlugin extends Plugin {
           this.refreshDashboardViews();
         },
         onComplete: (reason) => {
-          if (reason === "completed") {
+          if (reason === "completed" && expectEdits) {
             void this.recordProposedEdits(assistantEventId, assistantText);
           }
 

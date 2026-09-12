@@ -105,6 +105,16 @@ styles.css
 For alpha testing, use a copied vault or a small test vault first.
 
 ## Pi And Ollama Setup
+
+The expandable thinking scale at the bottom-right of the composer sets effort for the next prompt.
+Medium is the default, including for older saved Default preferences. Selected levels
+override the saved session level when a prompt starts. The selection is saved in Sidekick.
+Unsupported selections fall back to Medium or another supported level when switching models.
+Extra high appears when the model explicitly maps `thinkingLevelMap.xhigh` to a provider value.
+Ollama models expose low, medium, and high, subject to `thinkingLevelMap` exclusions.
+Off requires an explicit `thinkingLevelMap.off` provider value (such as `none`)
+and is unavailable for GPT-OSS. Levels depend on the model and Ollama version;
+they do not specify a duration. The prompt timeout remains a separate deadline.
 1. Start Ollama.
 2. Pull the local models you want to use.
 3. Tell Pi about those models. **This step is required and is not automatic** — Pi does not read Ollama's inventory. List each model in `~/.pi/agent/models.json`:
@@ -335,4 +345,3 @@ The plugin registers these Obsidian commands:
 - `Export active agent chat to Markdown`
 - `Suggest internal links for current note`
 - `Run agent safety self-check`
-

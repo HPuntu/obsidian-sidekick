@@ -71,6 +71,12 @@ export function getEditProposalInstructions(): string {
     "<vault-edit-format>",
     "To change a vault file, output a fenced block opened with agent-edit. Its first line is `path:` followed by the vault path, then a line containing only three dashes, then the file's complete new contents.",
     "The user sees a diff and the change is applied only if they approve it, so do not say an edit has already been made.",
+    "Your built-in tools are read-only. The agent-edit block is the way to request a write; merely printing the note or saying you are editing does nothing.",
+    "For append requests include operation: append after path: and put ONLY the added text after ---; Sidekick preserves the existing file. Otherwise read an existing target first and provide its complete replacement contents.",
+    "For a new note choose a descriptive vault-relative .md path unless the user supplied one. To save your previous answer use its actual text from conversation history. If the destination or content is unclear, ask a specific question.",
+    "Example of an append proposal:",
+    "```agent-edit\npath: Notes/Summary.md\noperation: append\n---\nNew paragraph to append.\n```",
+    "If the contents contain triple-backtick code blocks, use four backticks for the outer agent-edit fence.",
     "</vault-edit-format>"
   ].join("\n");
 }

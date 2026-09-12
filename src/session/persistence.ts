@@ -124,11 +124,14 @@ export function sanitizeSessionFileName(value: string): string {
   return sanitized || DEFAULT_SETTINGS.agentSessionName;
 }
 
+import { normalizeThinking } from "../bridge/pi/thinking";
+
 export function normalizeSettings(
   settings: AgentDashboardSettings
 ): AgentDashboardSettings {
   return {
     ...settings,
+    thinkingLevel: normalizeThinking(settings.thinkingLevel),
     agentSessionName:
       settings.agentSessionName?.trim() || DEFAULT_SETTINGS.agentSessionName,
     ollamaHost: settings.ollamaHost?.trim() || DEFAULT_SETTINGS.ollamaHost,
@@ -158,4 +161,3 @@ function normalizePiPromptTimeout(value: unknown): number {
 
   return Math.min(30, Math.max(2, Math.round(timeout)));
 }
-

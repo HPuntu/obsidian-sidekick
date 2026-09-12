@@ -8,6 +8,7 @@ import {
 } from "obsidian";
 
 import type AgentDashboardPlugin from "../main";
+import { normalizeTableSpacing } from "../markdown/normalizeTables";
 import type {
   AgentSessionHistoryItem,
   PiToolMode,
@@ -15,6 +16,7 @@ import type {
 } from "../types";
 import { UNKNOWN_TO_PI } from "../types";
 import { getOllamaModelName } from "../bridge/pi/piFlags";
+import { normalizeThinking, resolveThinking, supportedThinkingLevels } from "../bridge/pi/thinking";
 import type { AgentEvent, AgentToolEvent } from "../agent/AgentSession";
 import type { ProposedEditDiffLine } from "../agent/ProposedEdit";
 import type { OllamaSnapshot } from "../bridge/ollama/OllamaClient";
@@ -29,6 +31,7 @@ import { summarizeAllowedRoots } from "../security/SafetyPolicy";
  * leak across plugin reloads or bleed between leaves.
  */
 export interface DashboardUiState {
+  thinkingOpen?: boolean;
   agentPickerOpen: boolean;
   /** The Chats dropdown in the top bar. Mutually exclusive with menuOpen. */
   chatsOpen: boolean;
@@ -76,6 +79,7 @@ export function renderDashboardShell(
   containerEl: HTMLElement,
   options: DashboardRenderOptions
 ): void {
+  if (hasStreamSelection(containerEl)) return;
   // A rebuild destroys the composer. Status events repaint mid-stream, so
   // without this the caret jumps while the user is still typing.
   const composerFocus = captureFocusedComposer(containerEl);
@@ -278,6 +282,66 @@ function renderRunControls(
     });
 }
 
+function renderThinkingControl(plugin: AgentDashboardPlugin, container: HTMLElement, options: DashboardRenderOptions): void {
+  const model = plugin.piRpcDiscoverySnapshot.models.find(
+    (entry) => entry.label === getCurrentModelLabel(plugin)
+  );
+  const levels = supportedThinkingLevels(model);
+  const details = container.createEl("details", { cls: "agent-dashboard__thinking" });
+  details.open = options.host.ui.thinkingOpen === true;
+  const summary = details.createEl("summary", { attr: { "aria-label": "Thinking effort" } });
+  details.addEventListener("toggle", () => {
+    if (details.isConnected) options.host.ui.thinkingOpen = details.open;
+  });
+  summary.addEventListener("click", () => {
+    options.host.ui.thinkingOpen = !details.open;
+    if (!model && !details.open && plugin.piRpcDiscoverySnapshot.status !== "checking") {
+      void plugin.refreshPiRpcDiscovery(false);
+    }
+  });
+  setIcon(summary.createSpan(), "brain");
+  const caption = summary.createSpan();
+  setIcon(summary.createSpan(), "chevron-up");
+  const panel = details.createDiv({ cls: "agent-dashboard__thinking-panel" });
+  panel.createEl("strong", { text: "Thinking effort" });
+  const slider = panel.createEl("input", { type: "range", attr: {
+    min: "0", max: String(Math.max(0, levels.length - 1)), step: "1", "aria-label": "Thinking effort"
+  } });
+  slider.disabled = levels.length <= 1;
+  const effective = resolveThinking(plugin.settings.thinkingLevel, model);
+  slider.value = String(Math.max(0, levels.findIndex((level) => level === effective)));
+  const labels = panel.createDiv({ cls: "agent-dashboard__thinking-labels" });
+  const name = (value: string) => value === "xhigh" ? "Extra high" : value.charAt(0).toUpperCase() + value.slice(1);
+  for (const level of levels) labels.createSpan({ text: name(level) });
+  if (!model) {
+    panel.createEl("p", { text: plugin.piRpcDiscoverySnapshot.status === "checking"
+      ? "Loading model details..."
+      : plugin.piRpcDiscoverySnapshot.error ?? "Model details unavailable." });
+    new ButtonComponent(panel).setButtonText("Refresh models")
+      .setDisabled(plugin.piRpcDiscoverySnapshot.status === "checking")
+      .onClick(() => { void plugin.refreshPiRpcDiscovery(false); });
+  }
+  else if (!model.reasoning) panel.createEl("p", { text: "This model is not configured for thinking." });
+  const update = () => {
+    const level = levels[Number(slider.value)] ?? (model && !model.reasoning ? "off" : "medium");
+    caption.textContent = name(level);
+    slider.setAttribute("aria-valuetext", name(level));
+    summary.title = `Thinking: ${name(level)} (next prompt)`;
+  };
+  update();
+  slider.addEventListener("input", update);
+  slider.addEventListener("change", () => {
+    plugin.settings.thinkingLevel = normalizeThinking(levels[Number(slider.value)]);
+    void plugin.saveSettings();
+  });
+  details.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { details.open = false; summary.focus(); }
+  });
+  details.addEventListener("focusout", (event) => {
+    if (!event.relatedTarget || !details.contains(event.relatedTarget as Node)) details.open = false;
+  });
+}
+
 function truncateForDisplay(value: string, maxLength: number): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length <= maxLength
@@ -397,6 +461,7 @@ export function updateStreamedEventText(
   options: DashboardRenderOptions,
   event: AgentEvent
 ): boolean {
+  if (hasStreamSelection(containerEl)) return true;
   const eventEl = containerEl.querySelector(
     `[${EVENT_ID_ATTR}="${CSS.escape(event.id)}"]`
   );
@@ -416,7 +481,7 @@ export function updateStreamedEventText(
   textEl.empty();
   void MarkdownRenderer.render(
     plugin.app,
-    event.text,
+    normalizeTableSpacing(event.text),
     textEl,
     plugin.app.workspace.getActiveFile()?.path ?? "",
     options.host.markdownComponent
@@ -537,7 +602,8 @@ function renderTopBar(
   )
     // "Kill" rather than "Stop", so it is not mistaken for the composer's
     // Stop, which ends the current reply. This tears down the whole pipeline.
-    .setButtonText(ready ? "Kill" : "Start")
+    .setButtonText(plugin.pipelineStopping ? "Unloading..." : ready ? "Kill" : "Start")
+    .setDisabled(plugin.pipelineStopping)
     .setTooltip(
       ready
         ? "Unload the model from Ollama to free memory. Press Start to bring it back."
@@ -840,7 +906,7 @@ function renderAgentPickerPopover(
  * they cannot disagree.
  */
 function isPipelineReady(plugin: AgentDashboardPlugin): boolean {
-  return plugin.piRpcDiscoverySnapshot.status === "ready";
+  return !plugin.pipelineStopped && plugin.piRpcDiscoverySnapshot.status === "ready";
 }
 
 function renderPipelineIndicator(
@@ -1319,6 +1385,7 @@ function renderAgentPanel(
   });
 
   composerActionsEl.createDiv({ cls: "agent-dashboard__composer-spacer" });
+  renderThinkingControl(plugin, composerActionsEl, options);
 
   if (running) {
     renderIconButton(composerActionsEl, {
@@ -1490,6 +1557,7 @@ function renderAgentHistoryPage(
   });
 
   actionsEl.createDiv({ cls: "agent-dashboard__composer-spacer" });
+  renderThinkingControl(plugin, actionsEl, options);
 
   renderIconButton(actionsEl, {
     fallbackText: "Send",
@@ -1936,6 +2004,15 @@ function getApprovalDetail(record: ApprovalRecord): string {
   return "";
 }
 
+export function hasStreamSelection(container: HTMLElement): boolean {
+  const selection = container.ownerDocument.getSelection();
+  if (!selection || selection.isCollapsed) return false;
+  return [selection.anchorNode, selection.focusNode].some((node) => {
+    const element = node?.nodeType === 1 ? node as Element : node?.parentElement;
+    return !!element?.closest(".agent-dashboard__event-text") && !!node && container.contains(node);
+  });
+}
+
 function renderAgentEvent(
   plugin: AgentDashboardPlugin,
   containerEl: HTMLElement,
@@ -1966,13 +2043,21 @@ function renderAgentEvent(
     cls: "agent-dashboard__event-time",
     text: formatEventTime(event.createdAt)
   });
+  if (event.kind === "assistant") {
+    new ButtonComponent(metaEl).setIcon("copy").setTooltip("Copy response")
+      .onClick(async () => {
+        const latest = plugin.agentEvents.find((entry) => entry.id === event.id)?.text ?? event.text;
+        try { await navigator.clipboard.writeText(latest); new Notice("Response copied."); }
+        catch { new Notice("Could not access clipboard. Select the response text to copy it."); }
+      });
+  }
 
   const textEl = eventEl.createDiv({
     cls: "agent-dashboard__event-text markdown-rendered"
   });
   void MarkdownRenderer.render(
     plugin.app,
-    event.text,
+    normalizeTableSpacing(event.text),
     textEl,
     plugin.app.workspace.getActiveFile()?.path ?? "",
     options.host.markdownComponent

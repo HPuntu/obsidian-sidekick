@@ -2,8 +2,10 @@ import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import path from "path";
 
 import { piChildEnv } from "./piEnv";
+import type { ThinkingPreference } from "./thinking";
 
 export interface PiReadOnlyPromptOptions {
+  thinkingLevel?: ThinkingPreference;
   executablePath: string;
   modelLabel?: string;
   prompt: string;
@@ -79,6 +81,7 @@ export class PiReadOnlyPromptRun {
     callbacks: PiReadOnlyPromptCallbacks
   ) {
     this.options = {
+      thinkingLevel: options.thinkingLevel ?? "default",
       executablePath: options.executablePath.trim() || "pi",
       modelLabel: options.modelLabel ?? "",
       prompt: options.prompt,
@@ -431,6 +434,7 @@ export function setPiRpcModel(
 
   return new Promise((resolve) => {
     const args = buildReadOnlyArgs({
+      thinkingLevel: "default",
       allowPiUserConfig,
       executablePath: normalizedPath,
       modelLabel: "",
@@ -560,7 +564,7 @@ export function setPiRpcModel(
   });
 }
 
-function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>): string[] {
+export function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>): string[] {
   const args = [
     "--mode",
     "rpc"
@@ -584,6 +588,10 @@ function buildReadOnlyArgs(options: Required<PiReadOnlyPromptOptions>): string[]
 
   if (options.modelLabel) {
     args.push("--model", options.modelLabel);
+  }
+
+  if (options.thinkingLevel !== "default") {
+    args.push("--thinking", options.thinkingLevel);
   }
 
   return args;

@@ -1695,3 +1695,11 @@
     justify-content: flex-start;
   }
 }
+.agent-dashboard__thinking { position: relative; min-width: 0; margin-left: auto; }
+.agent-dashboard__thinking summary { display: flex; align-items: center; gap: 4px; cursor: pointer; padding: 5px; font-size: var(--font-ui-small); list-style: none; }
+.agent-dashboard__thinking summary::-webkit-details-marker { display: none; }
+.agent-dashboard__thinking summary svg { width: 14px; height: 14px; }
+.agent-dashboard__thinking-panel { position: absolute; right: 0; bottom: calc(100% + 8px); width: min(260px, 70vw); padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary); box-shadow: var(--shadow-s); z-index: 20; }
+.agent-dashboard__thinking-panel input { display: block; width: 100%; margin: 16px 0 8px; }
+.agent-dashboard__thinking-labels { display: flex; justify-content: space-between; gap: 4px; font-size: var(--font-smallest); }
+.agent-dashboard__thinking-panel p { font-size: var(--font-ui-small); margin-bottom: 0; }

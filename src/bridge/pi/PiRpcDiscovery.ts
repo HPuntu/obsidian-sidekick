@@ -2,10 +2,13 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { piChildEnv } from "./piEnv";
+import { THINKING_LEVELS, type ThinkingModel } from "./thinking";
 
 export type PiRpcDiscoveryStatus = "checking" | "error" | "ready" | "unknown";
+export const PI_DISCOVERY_TIMEOUT_MS = 15000;
 
 export interface PiRpcModelSummary {
+  thinkingLevelMap?: ThinkingModel["thinkingLevelMap"];
   contextWindow?: number;
   id?: string;
   label: string;
@@ -67,7 +70,7 @@ export function createCheckingPiRpcDiscoverySnapshot(
 
 export async function discoverPiRpc(
   executablePath: string,
-  timeoutMs = 4000,
+  timeoutMs = PI_DISCOVERY_TIMEOUT_MS,
   allowPiUserConfig = false
 ): Promise<PiRpcDiscoverySnapshot> {
   const normalizedPath = executablePath.trim() || "pi";
@@ -311,6 +314,10 @@ function getModelSummary(model: unknown): PiRpcModelSummary | undefined {
 
   return {
     contextWindow,
+    thinkingLevelMap: Object.fromEntries(THINKING_LEVELS.flatMap((level) => {
+      const value = asRecord(modelRecord.thinkingLevelMap)?.[level];
+      return value === null || typeof value === "string" ? [[level, value]] : [];
+    })),
     id,
     label,
     name,

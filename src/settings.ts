@@ -4,8 +4,10 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type AgentDashboardPlugin from "./main";
 import { DEFAULT_SIDEKICK_ROOT, normalizeSidekickRoot } from "./agent/SidekickProfile";
 import type { PiToolMode } from "./types";
+import type { ThinkingPreference } from "./bridge/pi/thinking";
 
 export interface AgentDashboardSettings {
+  thinkingLevel: ThinkingPreference;
   agentSessionName: string;
   allowedExternalWorkspaceRoots: string;
   piToolMode: PiToolMode;
@@ -24,6 +26,7 @@ export interface AgentDashboardSettings {
 }
 
 export const DEFAULT_SETTINGS: AgentDashboardSettings = {
+  thinkingLevel: "medium",
   agentSessionName: "default",
   allowedExternalWorkspaceRoots: "",
   // Pi's built-in read, grep, find, and ls. Meaningful only while

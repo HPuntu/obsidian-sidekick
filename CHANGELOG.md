@@ -1,5 +1,19 @@
 ## Unreleased
 
+### Added
+
+- Model-aware thinking effort control in the composer, defaulting to Medium and exposing Extra high only when supported by Pi.
+- Reviewed append proposals that preserve existing note contents, including support for nested code fences.
+- Copy buttons for assistant messages and selectable output while replies stream.
+
+### Fixed
+
+- Share concurrent Pi model discovery requests and allow more time for cold starts when sending a new chat with Enter.
+- Verify that Ollama has unloaded the selected model and reset the Kill button after successful unloading.
+- Refresh missing model metadata before starting prompts or choosing thinking effort.
+- Repair Markdown tables immediately following prose without changing copied source text or fenced code.
+- Avoid unsolicited edit proposals on answer-only questions and remove repetitive no-file-changes status messages.
+
 ## 1.0.0 - 2026-08-13
 
 First stable release. Local Sidekick reads your vault by default, writes only

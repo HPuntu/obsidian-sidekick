@@ -145,8 +145,12 @@ export async function unloadOllamaModel(
       "/api/generate",
       timeoutMs,
       "POST",
-      { keep_alive: 0, model: trimmedModel, prompt: "" }
+      { keep_alive: 0, model: trimmedModel, prompt: "", stream: false }
     );
+    const resident = await requestJson<OllamaTagsResponse>(normalizeHost(host), "/api/ps", timeoutMs);
+    if (isModelResident(trimmedModel, resident.models ?? [])) {
+      return { model: trimmedModel, success: false, error: "Ollama still reports this model as loaded. Try again after active requests finish." };
+    }
     return { model: trimmedModel, success: true };
   } catch (error) {
     return {
@@ -155,6 +159,11 @@ export async function unloadOllamaModel(
       success: false
     };
   }
+}
+
+export function isModelResident(model: string, resident: Array<{ name?: string; model?: string }>): boolean {
+  const canonical = (name: string) => name.includes(":") ? name : `${name}:latest`;
+  return resident.some((entry) => canonical(entry.name ?? entry.model ?? "") === canonical(model));
 }
 
 async function hydrateModelCapabilities(

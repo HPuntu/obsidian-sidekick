@@ -4,6 +4,9 @@ import { looksLikeEditRequest } from "../src/prompt/editIntent";
 
 describe("looksLikeEditRequest", () => {
   const asks = [
+    "take the last answer and add it to a new note file",
+    "append the last answer to an existing note",
+    "save the last response to Notes/test.md",
     "add internal links to this note",
     "update the frontmatter",
     "rewrite the introduction",
@@ -23,6 +26,11 @@ describe("looksLikeEditRequest", () => {
   });
 
   const answersOnly = [
+    "Given this formal definition of a distribution, would it be also correct to define it as a bijection: Formally, the distribution of a random variable X is the map B → P(X ∈ B), considered on a suitable collection of subsets B ⊆ R.",
+    "Is this correct in the note?",
+    "Explain the change of variables formula",
+    "make a table comparing the definitions",
+    "Do not edit any files; explain the definition",
     "summarise @Learning/Gradient Descent.md",
     "explain gradient descent",
     "what does this note say about regularisation?",
