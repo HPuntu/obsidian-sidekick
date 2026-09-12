@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.2.0 - 2026-09-12
+
 ### Agent Harness
 
 - Replace prompt-regex and chat-fence edit detection with explicit vault tools and a pre-execution approval round-trip to Obsidian.
