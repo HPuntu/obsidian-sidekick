@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.2.1 - 2026-11-07
+
 ### Fixed
 
 - Reconcile streamed answers with Pi's final message without duplicating text across tool turns.
