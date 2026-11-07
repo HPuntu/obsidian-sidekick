@@ -1,5 +1,10 @@
 ## Unreleased
 
+### Fixed
+
+- Reconcile streamed answers with Pi's final message without duplicating text across tool turns.
+- Report output-limit cutoffs, interrupted responses, and empty answers as failures, preserving partial text and including completion diagnostics. Failed turns are not automatically resubmitted.
+
 ## 1.2.0 - 2026-09-12
 
 ### Agent Harness

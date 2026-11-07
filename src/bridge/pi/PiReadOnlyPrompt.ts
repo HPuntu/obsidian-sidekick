@@ -30,6 +30,8 @@ export interface PiReadOnlyPromptCallbacks {
   onAssistantMessageStart?(): void;
   onVaultTool?(request: VaultToolRequest, signal: AbortSignal): Promise<VaultToolResult>;
   onAssistantDelta(delta: string): void;
+  /** Replace the current message when its final text differs from the stream. */
+  onAssistantText?(text: string): void;
   /** Terminal failure. Mutually exclusive with onComplete. */
   onError(message: string): void;
   /** Terminal success or abort. Mutually exclusive with onError. */
@@ -76,7 +78,9 @@ export class PiReadOnlyPromptRun {
   private callbacks: PiReadOnlyPromptCallbacks;
   private child?: ChildProcessWithoutNullStreams;
   private completed = false;
-  private emittedAssistantText = false;
+  private assistantText = "";
+  private finalAssistant?: Record<string, unknown>;
+  private pendingFailure?: string;
   private options: Required<PiReadOnlyPromptOptions>;
   private pendingCompletionMessage?: string;
   private reportedRunError?: string;
@@ -255,6 +259,7 @@ export class PiReadOnlyPromptRun {
   }
 
   private handleJsonLine(line: string): void {
+    if (this.completed) return;
     if (!line.trim()) {
       return;
     }
@@ -294,7 +299,8 @@ export class PiReadOnlyPromptRun {
     if (response.command === "get_state") {
       this.callbacks.onSessionState?.(extractSessionState(response.data));
       if (this.pendingCompletionMessage) {
-        this.complete(this.pendingCompletionMessage, "completed");
+        if (this.pendingFailure) this.fail(this.pendingFailure);
+        else this.complete(this.pendingCompletionMessage, "completed");
       }
       return;
     }
@@ -318,11 +324,19 @@ export class PiReadOnlyPromptRun {
         return;
       }
 
-      const error = getMessageError(record.messages);
-      if (error) {
-        this.reportRunError(error);
-      } else if (!this.emittedAssistantText) {
-        this.callbacks.onStatus("Pi completed without assistant text.");
+      const message = this.finalAssistant;
+      const stopReason = getString(message?.stopReason);
+      const error = getMessageError(message);
+      const usage = asRecord(message?.usage);
+      const outputTokens = typeof usage?.output === "number" ? `; output tokens: ${usage.output}` : "";
+      const diagnostics = `Stop reason: ${stopReason || "not reported"}${outputTokens}.`;
+      if (error) this.pendingFailure = `${normalizePiRunError(error, this.options)} ${diagnostics}`;
+      else if (stopReason === "length") {
+        this.pendingFailure = `Model output limit reached. The answer may be incomplete. Ask it to continue, or adjust the model's output limit. ${diagnostics}`;
+      } else if (stopReason === "error" || stopReason === "aborted") {
+        this.pendingFailure = `Model response ${stopReason === "aborted" ? "was interrupted" : "failed"}. Any partial answer has been kept. ${diagnostics}`;
+      } else if (!this.assistantText.trim()) {
+        this.pendingFailure = `Pi returned no answer text. It may have produced only reasoning or an empty response. Use Resend to try again; check any completed tool actions first. ${diagnostics}`;
       }
 
       this.requestFinalStateThenComplete("Pi run complete.");
@@ -345,7 +359,8 @@ export class PiReadOnlyPromptRun {
 
     if (record.type === "message_start") {
       if (asRecord(record.message)?.role === "assistant") {
-        this.emittedAssistantText = false;
+        this.assistantText = "";
+        this.finalAssistant = undefined;
         this.callbacks.onAssistantMessageStart?.();
       }
       this.callbacks.onStatus("Model response started.");
@@ -404,18 +419,24 @@ export class PiReadOnlyPromptRun {
       return;
     }
 
-    this.emittedAssistantText = true;
+    this.assistantText += delta;
     this.callbacks.onAssistantDelta(delta);
   }
 
   private emitFinalAssistantText(value: unknown): void {
-    if (this.emittedAssistantText) {
-      return;
-    }
-
-    const text = extractAssistantText(value);
-    if (text) {
-      this.emitAssistantDelta(text);
+    const message = Array.isArray(value)
+      ? value.map(asRecord).filter((item) => item?.role === "assistant").at(-1)
+      : asRecord(value);
+    if (!message || message.role !== "assistant") return;
+    this.finalAssistant = message;
+    const text = extractAssistantText(message);
+    // Empty error payloads must not erase a useful partial answer.
+    if (!text || text === this.assistantText) return;
+    if (text.startsWith(this.assistantText)) {
+      this.emitAssistantDelta(text.slice(this.assistantText.length));
+    } else if (this.callbacks.onAssistantText) {
+      this.assistantText = text;
+      this.callbacks.onAssistantText(text);
     }
   }
 
@@ -459,7 +480,8 @@ export class PiReadOnlyPromptRun {
 
   private requestFinalStateThenComplete(message: string): void {
     if (!this.child || this.child.stdin.destroyed) {
-      this.complete(message, "completed");
+      if (this.pendingFailure) this.fail(this.pendingFailure);
+      else this.complete(message, "completed");
       return;
     }
 

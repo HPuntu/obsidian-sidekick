@@ -2272,6 +2272,13 @@ export default class AgentDashboardPlugin extends Plugin {
             this.refreshStreamedEvent(event);
           }
         },
+        onAssistantText: (text) => {
+          assistantText = text;
+          clearThinking();
+          if (assistantEventId) this.updateAgentEvent(assistantEventId, text);
+          else assistantEventId = this.addAgentEvent("assistant", text).id;
+          this.refreshDashboardViews();
+        },
         onError: (message) => {
           this.activePromptRun = undefined;
           this.agentSessionStatus = "error";

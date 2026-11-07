@@ -16,7 +16,7 @@ async function fixture(tool: (request: VaultToolRequest, signal: AbortSignal) =>
     stdin: { write: vi.fn<(line: string) => void>(), end: vi.fn() }, killed: false, kill: vi.fn()
   });
   spawn.mockReturnValue(child);
-  const callbacks = { onVaultTool: tool, onAssistantDelta: vi.fn(), onAssistantMessageStart: vi.fn(), onError: vi.fn(), onComplete: vi.fn(), onStatus: vi.fn(), onToolEvent: vi.fn() };
+  const callbacks = { onVaultTool: tool, onAssistantText: vi.fn(), onAssistantDelta: vi.fn(), onAssistantMessageStart: vi.fn(), onError: vi.fn(), onComplete: vi.fn(), onStatus: vi.fn(), onToolEvent: vi.fn() };
   active = new PiReadOnlyPromptRun({ executablePath: "pi", prompt: "test", toolMode, vaultEditMode: "reviewed", allowPiUserConfig: false, timeoutMs: 5000 }, callbacks);
   active.start();
   await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
@@ -83,5 +83,97 @@ it("does not count time spent waiting for a review against the model timeout", a
   expect(f.callbacks.onError).not.toHaveBeenCalled();
   finish({ status: "denied" });
   await vi.advanceTimersByTimeAsync(5000);
+  expect(f.callbacks.onError).toHaveBeenCalledOnce();
+});
+
+function answer(text: string, stopReason = "stop") {
+  return { role: "assistant", content: [{ type: "text", text }], stopReason, usage: { output: 123 } };
+}
+
+function finish(f: Awaited<ReturnType<typeof fixture>>, message: ReturnType<typeof answer>) {
+  f.emit({ type: "message_end", message });
+  f.emit({ type: "turn_end", message });
+  f.emit({ type: "agent_end", messages: [message] });
+  f.emit({ type: "response", command: "get_state", success: true, data: {} });
+}
+
+function stream(f: Awaited<ReturnType<typeof fixture>>, delta: string) {
+  f.emit({ type: "message_start", message: { role: "assistant" } });
+  f.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
+}
+
+it("recovers missing final text without duplicating repeated terminal events", async () => {
+  const f = await fixture(undefined, "disabled");
+  stream(f, "Hello");
+  finish(f, answer("Hello world"));
+  expect(f.callbacks.onAssistantDelta.mock.calls.flat().join("")).toBe("Hello world");
+  expect(f.callbacks.onAssistantText).not.toHaveBeenCalled();
+  expect(f.callbacks.onComplete).toHaveBeenCalledExactlyOnceWith("completed");
+  expect(f.callbacks.onError).not.toHaveBeenCalled();
+});
+
+it("replaces divergent final text rather than appending it", async () => {
+  const f = await fixture(undefined, "disabled");
+  stream(f, "Wrong fragment");
+  finish(f, answer("Correct final answer"));
+  expect(f.callbacks.onAssistantText).toHaveBeenCalledExactlyOnceWith("Correct final answer");
+});
+
+it.each(["length", "error", "aborted"])("marks %s as failed and keeps partial text", async (reason) => {
+  const f = await fixture(undefined, "disabled");
+  stream(f, "Partial answer");
+  finish(f, answer("", reason));
+  expect(f.callbacks.onError).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(`Stop reason: ${reason}; output tokens: 123`));
+  expect(f.callbacks.onComplete).not.toHaveBeenCalled();
+  expect(f.callbacks.onAssistantText).not.toHaveBeenCalled();
+  expect(f.callbacks.onAssistantDelta).toHaveBeenCalledWith("Partial answer");
+  expect(f.messages().filter((m) => m.type === "prompt")).toHaveLength(1);
+});
+
+it.each(["", "   "])("treats empty or whitespace answers as unsuccessful without retrying", async (text) => {
+  const f = await fixture(undefined, "disabled");
+  finish(f, answer(text));
+  expect(f.callbacks.onError).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Pi returned no answer text"));
+  expect(f.callbacks.onComplete).not.toHaveBeenCalled();
+  expect(f.messages().filter((m) => m.type === "prompt")).toHaveLength(1);
+});
+
+it("rejects reasoning-only completion", async () => {
+  const f = await fixture(undefined, "disabled");
+  const message = { role: "assistant", content: [{ type: "thinking", thinking: "Working..." }], stopReason: "stop" };
+  f.emit({ type: "agent_end", messages: [message] });
+  f.emit({ type: "response", command: "get_state", success: true, data: {} });
+  expect(f.callbacks.onError).toHaveBeenCalledWith(expect.stringContaining("no answer text"));
+  expect(f.callbacks.onAssistantDelta).not.toHaveBeenCalled();
+});
+
+it("uses only the last assistant message after tools", async () => {
+  const f = await fixture(undefined, "disabled");
+  stream(f, "Looking it up");
+  f.emit({ type: "message_end", message: answer("Looking it up", "toolUse") });
+  stream(f, "The answer");
+  f.emit({ type: "agent_end", messages: [answer("Looking it up", "toolUse"), { role: "toolResult", content: [] }, answer("The answer is 42")] });
+  f.emit({ type: "response", command: "get_state", success: true, data: {} });
+  expect(f.callbacks.onAssistantDelta.mock.calls.flat()).toEqual(["Looking it up", "The answer", " is 42"]);
+  expect(f.callbacks.onComplete).toHaveBeenCalledWith("completed");
+});
+
+it("does not finish an attempt that Pi says it will retry", async () => {
+  const f = await fixture(undefined, "disabled");
+  f.emit({ type: "agent_end", willRetry: true, messages: [answer("", "error")] });
+  expect(f.callbacks.onError).not.toHaveBeenCalled();
+  expect(f.messages().some((m) => m.id === "local-sidekick-final-state")).toBe(false);
+  stream(f, "Recovered");
+  finish(f, answer("Recovered"));
+  expect(f.callbacks.onComplete).toHaveBeenCalledWith("completed");
+});
+
+it("reports provider errors as terminal failures and ignores late events", async () => {
+  const f = await fixture(undefined, "disabled");
+  finish(f, { ...answer("Partial", "error"), errorMessage: "Provider unavailable" } as ReturnType<typeof answer>);
+  expect(f.callbacks.onError).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Provider unavailable"));
+  expect(f.callbacks.onComplete).not.toHaveBeenCalled();
+  finish(f, answer("Late answer"));
+  expect(f.callbacks.onAssistantDelta.mock.calls.flat()).toEqual(["Partial"]);
   expect(f.callbacks.onError).toHaveBeenCalledOnce();
 });
